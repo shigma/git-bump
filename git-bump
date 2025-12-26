@@ -1,0 +1,312 @@
+#!/bin/bash
+
+if [ -z "$NO_COLOR" ]; then
+    _green="\033[32m"
+    _yellow="\033[33m"
+    _blue="\033[34m"
+    _cyan="\033[36m"
+    _red="\033[31m"
+    _magenta="\033[35m"
+    _bold="\033[1m"
+    _dim="\033[2m"
+    _reset="\033[0m"
+else
+    _green=""
+    _yellow=""
+    _blue=""
+    _cyan=""
+    _red=""
+    _magenta=""
+    _bold=""
+    _dim=""
+    _reset=""
+fi
+
+_stage() {
+    local stage="$1"
+    local message="$2"
+    local color="${3:-$_green}"
+    printf "${color}${_bold}%12s${_reset} %s\n" "$stage" "$message" 1>&2
+}
+
+_warn() {
+    printf "${_yellow}${_bold}%12s${_reset} %s\n" "Warning" "$1" 1>&2
+}
+
+_error() {
+    printf "${_red}${_bold}%12s${_reset} %s\n" "Error" "$1" 1>&2
+}
+
+_exit_with_error() {
+    _stage "" "See $LOG_FILE"
+    exit 1
+}
+
+indent() {
+    sed -r 's/^/             /g'
+}
+
+strip_ansi() {
+    sed -r 's/\x1b\[[0-9;]*[a-zA-Z]//g'
+}
+
+_eval() {
+    local command="$1"
+    local capture="$2"
+
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')]" >> "$LOG_FILE"
+    echo "Command: $command" >> "$LOG_FILE"
+
+    local stdout_fifo=$(mktemp -u)
+    local stderr_fifo=$(mktemp -u)
+    mkfifo "$stdout_fifo" "$stderr_fifo"
+    local clean_up="rm -f '$stdout_fifo' '$stderr_fifo'"
+    trap "$clean_up" EXIT
+
+    if [[ "$VERBOSE" == "true" ]]; then
+        printf "${_cyan}${_bold}%12s${_reset} %s\n" "$" "$command" 1>&2
+    fi
+
+    # stdout
+    if [[ "$VERBOSE" == "true" ]]; then
+        if [[ "$capture" == "true" ]]; then
+            tee < "$stdout_fifo" >(strip_ansi >> "$LOG_FILE") >(indent >&2) &
+        else
+            tee < "$stdout_fifo" >(strip_ansi >> "$LOG_FILE") >(indent >&2) >/dev/null &
+        fi
+    else
+        if [[ "$capture" == "true" ]]; then
+            tee < "$stdout_fifo" >(strip_ansi >> "$LOG_FILE") &
+        else
+            tee < "$stdout_fifo" >(strip_ansi >> "$LOG_FILE") >/dev/null &
+        fi
+    fi
+
+    # stderr
+    if [[ "$VERBOSE" == "true" ]]; then
+        tee < "$stderr_fifo" >(strip_ansi >> "$LOG_FILE") >(indent >&2) >/dev/null &
+    else
+        tee < "$stderr_fifo" >(strip_ansi >> "$LOG_FILE") >/dev/null &
+    fi
+
+    # This will lose git colors, but only affects verbose mode, so we ignore it for now
+    eval "$command" > "$stdout_fifo" 2> "$stderr_fifo"
+    local exit_code=$?
+
+    wait
+    eval "$clean_up"
+    trap - EXIT
+
+    echo "Exit Code: $exit_code" >> "$LOG_FILE"
+    echo "" >> "$LOG_FILE"
+    return $exit_code
+}
+
+_build_tag() {
+    SUFFIX="$1"
+
+    if [ -z "$SUFFIX" ]; then
+        CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+        if [ "$CURRENT_BRANCH" != "main" ] && [ -n "$CURRENT_BRANCH" ] && [ "$CURRENT_BRANCH" != "HEAD" ]; then
+            SUFFIX="${CURRENT_BRANCH##*/}"
+        fi
+    fi
+
+    if [ -n "$SUFFIX" ]; then
+        SUFFIX="-$SUFFIX"
+    fi
+
+    TODAY_DATE=$(date "+%Y%m%d")
+
+    local grep_cmd="git tag -l | grep -E \"^build-$TODAY_DATE\\\\.[0-9]+(-.*)?$\" | sort -V"
+    EXISTING_TAGS=$(_eval "$grep_cmd" "true")
+
+    if [ -z "$EXISTING_TAGS" ]; then
+        echo build-$TODAY_DATE.0$SUFFIX
+        return
+    fi
+
+    MAX_VERSION=0
+    for tag in $EXISTING_TAGS; do
+        version=$(echo "$tag" | sed -E "s/^build-$TODAY_DATE\.([0-9]+)(-.*)?$/\1/")
+        if [[ "$version" =~ ^[0-9]+$ ]] && [ "$version" -gt "$MAX_VERSION" ]; then
+            MAX_VERSION=$version
+        fi
+    done
+
+    echo build-$TODAY_DATE.$((MAX_VERSION + 1))$SUFFIX
+}
+
+DRY_RUN="false"
+VERBOSE="false"
+SKIP_CONFIRM="false"
+HELP="false"
+FORCE_BRANCH="false"
+SUFFIX=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --skip-confirm)
+            SKIP_CONFIRM="true"
+            shift
+            ;;
+        --help)
+            HELP="true"
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN="true"
+            shift
+            ;;
+        --verbose)
+            VERBOSE="true"
+            shift
+            ;;
+        --force-branch)
+            FORCE_BRANCH="true"
+            shift
+            ;;
+        -*)
+            for (( i=1; i<${#1}; i++ )); do
+                case "${1:$i:1}" in
+                    s)
+                        SKIP_CONFIRM="true"
+                        ;;
+                    h)
+                        HELP="true"
+                        ;;
+                    n)
+                        DRY_RUN="true"
+                        ;;
+                    v)
+                        VERBOSE="true"
+                        ;;
+                    f)
+                        FORCE_BRANCH="true"
+                        ;;
+                    *)
+                        _error "Unknown option: -${1:$i:1}"
+                        exit 1
+                        ;;
+                esac
+            done
+            shift
+            ;;
+        *)
+            SUFFIX="$1"
+            shift
+            ;;
+    esac
+done
+
+if [[ "$HELP" == "true" ]]; then
+    script_name="${0##*/}"
+    echo -e "Create build tags
+
+${_bold}${_green}Usage: ${_cyan}${script_name}${_reset} ${_cyan}[OPTIONS] [SUFFIX]${_reset}
+
+${_bold}${_green}Arguments:${_reset}
+    ${_cyan}[SUFFIX]${_reset}            Optional suffix for the tag (defaults to branch name if not 'main')
+
+${_bold}${_green}Options:${_reset}
+    ${_bold}${_cyan}-s, --skip-confirm${_reset}         Skip confirmation when current commit has existing tags
+    ${_bold}${_cyan}-h, --help${_reset}                 Print help information
+    ${_bold}${_cyan}-n, --dry-run${_reset}              Show what tag would be created without actually creating it
+    ${_bold}${_cyan}-v, --verbose${_reset}              Show detailed command execution
+    ${_bold}${_cyan}-f, --force-branch${_reset}         Force bump on non-main branch
+"
+    exit 0
+fi
+
+if [[ "$FORCE_BRANCH" != "true" ]]; then
+    CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+    if [ "$CURRENT_BRANCH" != "main" ]; then
+        _error "You are not on the main branch. Use -f/-force--branch to force bump on non-main branch."
+        exit 1
+    fi
+fi
+
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "Not in a git repository" 1>&2
+    exit 1
+fi
+
+LOG_FILE=$(mktemp "${TMPDIR:-/tmp}/${0##*/}-$(date +%Y%m%d-%H%M%S)-XXXXXX.log")
+
+if [[ "$DRY_RUN" == "false" ]]; then
+    _stage "Fetching" "remote tags"
+    if ! _eval "git fetch --tags" "false"; then
+        _error "Failed to fetch remote tags"
+        _exit_with_error
+    fi
+fi
+
+NEW_TAG=$(_build_tag "$SUFFIX")
+
+if [[ "$DRY_RUN" == "true" ]]; then
+    echo "$NEW_TAG"
+    exit 0
+fi
+
+COMMIT_EXISTING_TAGS=$(_eval "git tag --points-at HEAD" "true")
+
+if [ -n "$COMMIT_EXISTING_TAGS" ]; then
+    _warn "Current commit already has existing tags:"
+    echo "$COMMIT_EXISTING_TAGS" | sed 's/^/             /' 1>&2
+
+    if [[ "$SKIP_CONFIRM" == "false" ]]; then
+        printf "${_blue}${_bold}"
+        if [ -n "$ZSH_VERSION" ]; then
+            read "FORCE_CREATE_TAG?    Continue? [y/n] "
+        else
+            read -p "   Continue? [y/n] " FORCE_CREATE_TAG
+        fi
+        printf "${_reset}"
+
+        if [ "$FORCE_CREATE_TAG" != "y" ] && [ "$FORCE_CREATE_TAG" != "Y" ]; then
+            _stage "Cancelled" "tag creation" "$_yellow"
+            exit 1
+        fi
+    fi
+fi
+
+REMOTE_BRANCHES_CONTAINING_HEAD=$(_eval "git branch -r --contains HEAD" "true")
+
+if [ -z "$REMOTE_BRANCHES_CONTAINING_HEAD" ]; then
+    CURRENT_BRANCH=$(_eval "git rev-parse --abbrev-ref HEAD" "true")
+
+    if [ "$CURRENT_BRANCH" = "HEAD" ]; then
+        _error "You are in detached HEAD state. Cannot push current branch to remote."
+        _exit_with_error
+    fi
+
+    _stage "Pushing" "current branch to origin"
+
+    if ! _eval "git push origin $CURRENT_BRANCH" "false"; then
+        _error "Failed to push current branch '$CURRENT_BRANCH' to remote"
+        _exit_with_error
+    fi
+fi
+
+_stage "Creating" "tag $NEW_TAG"
+
+if ! _eval "git tag $NEW_TAG" "false"; then
+    _error "Failed to create tag $NEW_TAG"
+    _exit_with_error
+fi
+
+_stage "Pushing" "tag $NEW_TAG to origin"
+
+if ! _eval "git push origin $NEW_TAG" "false"; then
+    _error "Failed to push tag $NEW_TAG to origin"
+    if ! _eval "git tag -d $NEW_TAG" "false"; then
+        _warn "Failed to remove local tag $NEW_TAG. You may need to remove it manually."
+    else
+        _stage "Cancelled" "local tag $NEW_TAG removed" "$_yellow"
+    fi
+    _exit_with_error
+fi
+
+_stage "Finished" "tag $NEW_TAG created and pushed successfully"
+
+rm -f "$LOG_FILE"
