@@ -1,14 +1,13 @@
 # git-bump
 
-A simple CLI tool to create auto-incrementing daily build tags.
+A simple CLI tool to create auto-incrementing build tags.
 
 ## Installation
 
 ```bash
 # Clone and install
 git clone https://github.com/shigma/git-bump.git
-cp git-bump/git-bump ~/.local/bin/
-chmod +x ~/.local/bin/git-bump
+install -m 755 git-bump/git-bump ~/.local/bin/
 
 # Now you can use it as a git subcommand
 git bump
