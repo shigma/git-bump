@@ -1,6 +1,6 @@
 #!/bin/bash
 
-if [ -z "$NO_COLOR" ]; then
+if [ -z "$NO_COLOR:-" ]; then
     _green="\033[32m"
     _yellow="\033[33m"
     _blue="\033[34m"
@@ -201,9 +201,14 @@ done
 
 if [[ "$HELP" == "true" ]]; then
     script_name="${0##*/}"
-    echo -e "Create build tags
+    if [[ "$script_name" == git-* ]]; then
+        script_name="git ${script_name#git-}"
+    fi
 
-${_bold}${_green}Usage: ${_cyan}${script_name}${_reset} ${_cyan}[OPTIONS] [SUFFIX]${_reset}
+    echo -e "\
+Create build tags
+
+${_bold}${_green}Usage: ${_cyan}${script_name}${_reset} ${_cyan}[SUFFIX] [OPTIONS]${_reset}
 
 ${_bold}${_green}Arguments:${_reset}
     ${_cyan}[SUFFIX]${_reset}            Optional suffix for the tag (defaults to branch name if not 'main')
@@ -221,7 +226,7 @@ fi
 if [[ "$FORCE_BRANCH" != "true" ]]; then
     CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
     if [ "$CURRENT_BRANCH" != "main" ]; then
-        _error "You are not on the main branch. Use -f/-force--branch to force bump on non-main branch."
+        _error "You are not on the main branch. Use -f/--force-branch to force bump on non-main branch."
         exit 1
     fi
 fi
