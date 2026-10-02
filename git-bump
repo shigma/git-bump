@@ -295,7 +295,7 @@ fi
 
 _stage "Creating" "tag $NEW_TAG"
 
-if ! _eval "git tag $NEW_TAG" "false"; then
+if ! _eval "git tag \"$NEW_TAG\" -m \"$NEW_TAG\"" "false"; then
     _error "Failed to create tag $NEW_TAG"
     _exit_with_error
 fi
